@@ -1,0 +1,25 @@
+# requirements.txt
+
+# Core
+
+numpy
+opencv-python
+opencv-python-headless
+pillow
+scipy
+python-dotenv
+mavsdk
+
+# Vision / Embeddings
+
+torch
+torchvision
+
+# Gesture (optional; Python <= 3.10 typically)
+
+onnxruntime
+
+# Dedupe
+
+ImageHash
+faiss-cpu
