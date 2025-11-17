@@ -110,6 +110,37 @@ async def apply_gesture_action(
         await mav.sys.action.return_to_launch()
         return FlightState.RTL
 
+    # STRAFE: short lateral velocity burst
+    if kind == GestureActionType.STRAFE:
+        # Only strafe while actively capturing (Offboard running)
+        if state != FlightState.CAPTURING:
+            return state
+
+        # Configure a short strafe burst
+        dur = 1.0  # seconds
+        vy = float(action.vy)
+
+        # Attach to the run_sitl function object (like alt_target, _yaw_lp)
+        now = time.time()
+        setattr(run_sitl, "vy_cmd", vy)
+        setattr(run_sitl, "vy_until", now + dur)
+
+        return state
+
+    # YAW_OFFSET: short yaw nudge
+    if kind == GestureActionType.YAW_OFFSET:
+        if state != FlightState.CAPTURING:
+            return state
+
+        dur = 1.5  # seconds
+        dyaw = float(action.dyaw)
+
+        now = time.time()
+        setattr(run_sitl, "dyaw", dyaw)
+        setattr(run_sitl, "yaw_until", now + dur)
+
+        return state
+
     return state
 
 
@@ -345,7 +376,16 @@ async def run_sitl(cfg: Config, args):
 
             # --- Yaw-only offboard control; let PX4 hold altitude ---
             if mapper.state == FlightState.CAPTURING:
+                now = time.time()
+
+                # Base yaw delta from NBV
                 delta = decision.heading_delta_deg
+
+                # If a gesture yaw override is active, use it instead
+                yaw_until = getattr(run_sitl, "yaw_until", 0.0)
+                if now < yaw_until:
+                    delta = float(getattr(run_sitl, "dyaw", 0.0))
+
                 # enforce minimum step so we don't get stuck on 0
                 if abs(delta) < 3.0:
                     delta = 3.0 if delta >= 0 else -3.0
@@ -361,9 +401,19 @@ async def run_sitl(cfg: Config, args):
                 alpha = 0.2
                 run_sitl._yaw_lp = (1 - alpha) * run_sitl._yaw_lp + alpha * target_yaw
 
+                # Lateral velocity from gestures (default 0)
+                vy_cmd = 0.0
+                vy_until = getattr(run_sitl, "vy_until", 0.0)
+                if now < vy_until:
+                    vy_cmd = float(getattr(run_sitl, "vy_cmd", 0.0))
+                else:
+                    # ensure we don't keep drifting after the burst
+                    setattr(run_sitl, "vy_cmd", 0.0)
+
                 cv2.putText(
                     frame,
-                    f"hdg:{tel.heading_deg:+.1f} tgt:{run_sitl._yaw_lp:+.1f} alt:{tel.alt:.2f}",
+                    f"hdg:{tel.heading_deg:+.1f} tgt:{run_sitl._yaw_lp:+.1f} "
+                    f"alt:{tel.alt:.2f} vy:{vy_cmd:+.2f}",
                     (12, 46),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
@@ -373,7 +423,7 @@ async def run_sitl(cfg: Config, args):
 
                 try:
                     await mav.sys.offboard.set_velocity_ned(
-                        VelocityNedYaw(0.0, 0.0, 0.0, run_sitl._yaw_lp)
+                        VelocityNedYaw(0.0, vy_cmd, 0.0, run_sitl._yaw_lp)
                     )
                 except Exception as e:
                     print(f"[SEND] set_velocity failed: {e}. Exiting loop.")

@@ -285,7 +285,30 @@ class GestureController:
 
         # 1) OPEN PALM: all non-thumb fingers extended
         if non_thumb_extended >= 4:
-            return RawGestureType.OPEN_PALM
+            # Use average x-position of landmarks to decide left/right
+            center_x = float(np.mean(pts[:, 0]))
+            if center_x < 0.4:
+                return RawGestureType.PALM_LEFT
+            elif center_x > 0.6:
+                return RawGestureType.PALM_RIGHT
+            else:
+                return RawGestureType.OPEN_PALM
+        
+        # 1b) POINT_LEFT / POINT_RIGHT:        
+        # index extended, others curled, finger mostly horizontal
+        if index_ext and not middle_ext and not ring_ext and not pinky_ext:
+            idx_tip = pts[8]
+            idx_base = pts[5]
+            idx_vec = idx_tip[:2] - idx_base[:2]
+            dx = float(idx_vec[0])
+            dy = float(idx_vec[1])
+
+            # Mostly horizontal and sufficiently long
+            if abs(dx) > abs(dy) and abs(dx) > 0.03:
+                if dx < 0.0:
+                    return RawGestureType.POINT_LEFT
+                else:
+                    return RawGestureType.POINT_RIGHT
 
         # 2) FIST: no non-thumb fingers extended and thumb not clearly up/down
         if non_thumb_extended == 0 and not (thumb_up or thumb_down):

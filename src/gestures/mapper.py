@@ -20,6 +20,10 @@ class RawGestureType(Enum):
     THUMB_UP = auto()
     THUMB_DOWN = auto()
     OPEN_PALM = auto()
+    POINT_LEFT = auto()
+    POINT_RIGHT = auto()
+    PALM_LEFT = auto()
+    PALM_RIGHT = auto()
     # Add more as needed (e.g., V_SIGN, POINT_LEFT, etc.)
 
 
