@@ -9,8 +9,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from .onnx_gesture import ONNXHandRuntime, HandLandmarks
-from .gestures.mapper import RawGestureType  # your existing enum
+from .gestures.mapper import RawGestureType
+from .onnx_gesture import HandLandmarks, ONNXHandRuntime
 
 
 @dataclass
@@ -50,7 +50,8 @@ class GestureController:
             self.runtime = ONNXHandRuntime(
                 det_model_path="models/hand_det.onnx",
                 lm_model_path="models/hand_landmarks.onnx",
-                device="cpu",  # can switch to "cuda" if you have GPU + CUDA builds
+                device="cpu",
+                detection_mode="cv",
             )
             self.enabled = True
             self.last_status = "ENABLED"
@@ -64,64 +65,62 @@ class GestureController:
 
     # ---------- Main hook used by main.py ----------
 
-    def detect(self, frame_bgr) -> Optional[RawGestureType]:
+    def detect(self, frame_bgr) -> RawGestureType:
         """
-        Returns a RawGestureType or None.
-        Applies:
-          - Landmark ONNX
-          - Heuristic classification
-          - Temporal smoothing (majority over last few frames)
-          - Cooldown so we don't trigger every frame
-        """
-        if not self.enabled or self.runtime is None:
-            self.last_detected = None
-            return None
+        Run ONNX hand detection + landmarks, then classify into a RawGestureType.
 
+        Returns:
+            RawGestureType value, e.g.
+            - RawGestureType.THUMB_UP
+            - RawGestureType.THUMB_DOWN
+            - RawGestureType.OPEN_PALM
+            - RawGestureType.FIST
+            - RawGestureType.NONE
+        """
+        # If gestures are disabled, always output NONE
+        if not getattr(self, "enabled", False):
+            return RawGestureType.NONE
+
+        if frame_bgr is None:
+            return RawGestureType.NONE
+
+        if self.runtime is None:
+            # Failed initialization earlier
+            return RawGestureType.NONE
+
+        # 1) Run detector + landmarks
         lm = self.runtime.detect_and_landmarks(frame_bgr)
         if lm is None:
-            # no hand found / bad output
-            self._history.append(RawGestureType.NONE)
-        else:
-            kind, score = self._classify_from_landmarks(lm)
-
-            # Reject low-confidence / ambiguous poses by mapping to NONE
-            if score < 0.10:
-                kind = RawGestureType.NONE
-
-            self._history.append(kind)
-
-        # --- temporal smoothing: majority vote over last K frames ---
-        if not self._history:
-            stable = RawGestureType.NONE
-        else:
-            counts = {}
-            for k in self._history:
-                counts[k] = counts.get(k, 0) + 1
-            stable = max(counts.items(), key=lambda kv: kv[1])[0]
-
-        # --- cooldown: only emit non-NONE every cooldown_s seconds ---
-        now = time.time()
-        emit_kind = stable
-
-        if emit_kind != RawGestureType.NONE:
-            if now - self._last_emit_time < self.cooldown_s:
-                # Too soon; ignore this gesture
-                emit_kind = RawGestureType.NONE
-            else:
-                self._last_emit_time = now
-
-        # Update last_detected for overlay
-        if emit_kind == RawGestureType.NONE:
+            # No hand found / landmarks failed
             self.last_detected = None
-            return None
+            return RawGestureType.NONE
 
-        # We don't track score here after smoothing, so just store 1.0
-        from .gestures.mapper import RawGestureType as RGT
-        fake_score = 1.0
+        # Optional: if you want to use lm.score as a confidence gate
+        # (set something like self.min_conf = 0.3 in __init__)
+        min_conf = getattr(self, "min_conf", 0.0)
+        if lm.score < min_conf:
+            self.last_detected = None
+            return RawGestureType.NONE
+
+        # 2) Classify based on landmark geometry
+        raw = self._classify_raw_gesture(lm)
+
+        # Store for overlay/debug
         self.last_detected = DetectedGesture(
-            kind=emit_kind, score=fake_score, landmarks=lm if lm is not None else None
+            kind=raw,
+            score=float(lm.score),
+            landmarks=lm,
         )
-        return emit_kind
+
+        # 3) Optional: smoothing / cooldown
+        # If you already have a smoother or cooldown logic, plug it in here
+        # instead of returning `raw` directly.
+        #
+        # Example:
+        #   raw_smoothed = self._smoother.update(raw)
+        #   return raw_smoothed
+
+        return raw
 
 
     def overlay_status(self, frame_bgr):
@@ -218,3 +217,87 @@ class GestureController:
             return RGT.OPEN_PALM, open_score
 
         return RGT.NONE, open_score
+
+    def _finger_extended(self, pts: np.ndarray, tip_idx: int, pip_idx: int, thresh: float = 0.04) -> bool:
+        """
+        Returns True if a finger is extended (tip above PIP in image coords).
+
+        pts: (21, 3) array
+        tip_idx: landmark index of the fingertip
+        pip_idx: landmark index of the PIP joint (second joint from hand)
+        """
+        tip_y = pts[tip_idx, 1]
+        pip_y = pts[pip_idx, 1]
+        # In image coords, smaller y = higher (more "up")
+        return tip_y < pip_y - thresh
+
+    def _classify_raw_gesture(self, lm: HandLandmarks) -> RawGestureType:
+        """
+        Classify a raw gesture from hand landmarks.
+
+        Returns one of:
+          - RawGestureType.FIST
+          - RawGestureType.OPEN_PALM
+          - RawGestureType.THUMB_UP
+          - RawGestureType.THUMB_DOWN
+          - RawGestureType.NONE
+        """
+        pts = lm.points  # (21, 3) normalized [0,1] in full-frame coords
+
+        if pts.shape != (21, 3):
+            return RawGestureType.NONE
+
+        wrist = pts[0]
+        wrist_y = wrist[1]
+
+        # --- Finger extended flags (index, middle, ring, pinky) ---
+        index_ext = self._finger_extended(pts, tip_idx=8, pip_idx=6)
+        middle_ext = self._finger_extended(pts, tip_idx=12, pip_idx=10)
+        ring_ext = self._finger_extended(pts, tip_idx=16, pip_idx=14)
+        pinky_ext = self._finger_extended(pts, tip_idx=20, pip_idx=18)
+
+        non_thumb_extended = sum([index_ext, middle_ext, ring_ext, pinky_ext])
+
+        # --- Thumb "extended" & direction ---
+        thumb_tip = pts[4]
+        thumb_base = pts[1]
+        thumb_vec = thumb_tip[:2] - thumb_base[:2]
+        thumb_len = float(np.linalg.norm(thumb_vec))
+
+        # Approximate average length of index, middle, ring fingers (MCP -> tip)
+        index_len = float(np.linalg.norm(pts[8, :2] - pts[5, :2]))
+        middle_len = float(np.linalg.norm(pts[12, :2] - pts[9, :2]))
+        ring_len = float(np.linalg.norm(pts[16, :2] - pts[13, :2]))
+
+        avg_finger_len = max(1e-5, (index_len + middle_len + ring_len) / 3.0)
+
+        thumb_extended = thumb_len > 0.6 * avg_finger_len
+
+        thumb_tip_y = thumb_tip[1]
+        # thresholds: how far above/below wrist counts as "up" / "down"
+        up_thresh = 0.04
+        down_thresh = 0.04
+
+        thumb_up = thumb_extended and (thumb_tip_y < wrist_y - up_thresh)
+        thumb_down = thumb_extended and (thumb_tip_y > wrist_y + down_thresh)
+
+        # --- Gesture patterns (order matters) ---
+
+        # 1) OPEN PALM: all non-thumb fingers extended
+        if non_thumb_extended >= 4:
+            return RawGestureType.OPEN_PALM
+
+        # 2) FIST: no non-thumb fingers extended and thumb not clearly up/down
+        if non_thumb_extended == 0 and not (thumb_up or thumb_down):
+            return RawGestureType.FIST
+
+        # 3) THUMB UP: thumb up, others mostly curled
+        if thumb_up and non_thumb_extended <= 1:
+            return RawGestureType.THUMB_UP
+
+        # 4) THUMB DOWN: thumb down, others mostly curled
+        if thumb_down and non_thumb_extended <= 1:
+            return RawGestureType.THUMB_DOWN
+
+        # If we get here, we don't have a clear pattern
+        return RawGestureType.NONE

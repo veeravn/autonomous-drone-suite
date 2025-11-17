@@ -2,7 +2,7 @@
 
 # Core
 
-numpy
+numpy<2
 opencv-python
 opencv-python-headless
 pillow
@@ -15,7 +15,7 @@ mavsdk
 torch
 torchvision
 
-# Gesture (optional; Python <= 3.10 typically)
+# Gesture
 
 onnxruntime
 

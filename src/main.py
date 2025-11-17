@@ -68,12 +68,19 @@ async def apply_gesture_action(
 
     # ALTITUDE OFFSET
     if kind == GestureActionType.ALT_OFFSET:
+        # Only allow discrete altitude changes while actively capturing.
+        # If we're PAUSE/HOLD, IDLE, RTL, etc., ignore this gesture.
+        if state != FlightState.CAPTURING:
+            return state
+
         # Discrete altitude change: update target, then single climb
         new_target = max(0.5, float(tel.alt) + float(action.dz))
         if abs(new_target - float(tel.alt)) < 0.10:  # ignore tiny changes
             return state
+
         run_sitl.alt_target = new_target
         print(f"[ALT CMD] → {run_sitl.alt_target:.2f} m")
+
         await mav.climb_to_alt(
             run_sitl.alt_target,
             vz_m_s=(-0.7 if action.dz > 0 else +0.5),
@@ -115,9 +122,12 @@ def run_local(cfg: Config, args):
     """
     cap = None
     try:
+        print("[LOCAL] Starting local NBV + gesture loop")
+
         # Camera
         if int(args.camera) == -1:
             cap = None  # headless
+            print("[LOCAL] Running headless (no camera)")
         else:
             try:
                 cap = open_camera(args.camera)
@@ -164,6 +174,11 @@ def run_local(cfg: Config, args):
             raw_gesture = gestures.detect(frame)
             if hasattr(gestures, "overlay_status"):
                 gestures.overlay_status(frame)
+
+            # Optional debug print
+            if raw_gesture is not None:
+                print(f"[LOCAL][GESTURE] raw={raw_gesture}")
+
             action = mapper.map(raw_gesture)
 
             # NBV decision
@@ -184,7 +199,10 @@ def run_local(cfg: Config, args):
 
             # Novelty-gated capture + dedupe
             now = time.time()
-            if now - t_last_capture > cfg.capture_period_s and decision.novelty_score >= NOVELTY_CAPTURE_MIN:
+            if (
+                now - t_last_capture > cfg.capture_period_s
+                and decision.novelty_score >= NOVELTY_CAPTURE_MIN
+            ):
                 pos = (tel.lat, tel.lon, tel.alt)
                 if not dedupe.is_duplicate(frame, pos):
                     dedupe.add(frame, pos)
@@ -212,6 +230,7 @@ def run_local(cfg: Config, args):
             cv2.destroyAllWindows()
         except Exception:
             pass
+        print("[LOCAL] Cleaned up camera + windows")
 
 
 # ---------- SITL / MAVSDK loop ----------
