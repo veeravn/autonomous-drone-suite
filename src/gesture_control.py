@@ -310,7 +310,7 @@ class GestureController:
 
         if mostly_horizontal:
             # Optional: temporary debug
-            print(f"[POINT DETECT] dx={dx:.3f}, dy={dy:.3f}, horiz={mostly_horizontal}")
+            # print(f"[POINT DETECT] dx={dx:.3f}, dy={dy:.3f}, horiz={mostly_horizontal}")
             if dx < 0.0:
                 return RawGestureType.POINT_LEFT
             else:
