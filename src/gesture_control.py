@@ -296,19 +296,27 @@ class GestureController:
         
         # 1b) POINT_LEFT / POINT_RIGHT:        
         # index extended, others curled, finger mostly horizontal
-        if index_ext and not middle_ext and not ring_ext and not pinky_ext:
-            idx_tip = pts[8]
-            idx_base = pts[5]
-            idx_vec = idx_tip[:2] - idx_base[:2]
-            dx = float(idx_vec[0])
-            dy = float(idx_vec[1])
+        index_tip = pts[8]
+        index_base = pts[5]
+        idx_vec = index_tip[:2] - index_base[:2]
+        dx = float(idx_vec[0])
+        dy = float(idx_vec[1])
 
-            # Mostly horizontal and sufficiently long
-            if abs(dx) > abs(dy) and abs(dx) > 0.03:
-                if dx < 0.0:
-                    return RawGestureType.POINT_LEFT
-                else:
-                    return RawGestureType.POINT_RIGHT
+        # We are already past the OPEN_PALM / PALM_LEFT / PALM_RIGHT check,
+        # so non_thumb_extended < 4 here.
+        # Heuristic: mostly horizontal and non-trivial length.
+        # Your debug shows dx values in the 25–70 range, so use ~15 as a floor.
+        mostly_horizontal = abs(dx) > abs(dy) * 0.5 and abs(dx) > 15.0
+
+        if mostly_horizontal:
+            # Optional: temporary debug
+            print(f"[POINT DETECT] dx={dx:.3f}, dy={dy:.3f}, horiz={mostly_horizontal}")
+            if dx < 0.0:
+                return RawGestureType.POINT_LEFT
+            else:
+                return RawGestureType.POINT_RIGHT
+        
+
 
         # 2) FIST: no non-thumb fingers extended and thumb not clearly up/down
         if non_thumb_extended == 0 and not (thumb_up or thumb_down):

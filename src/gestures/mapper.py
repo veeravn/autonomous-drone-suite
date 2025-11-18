@@ -39,7 +39,8 @@ class GestureActionType(Enum):
     RESUME = auto()
     LAND = auto()
     RTL = auto()
-
+    YAW_OFFSET = auto()   # new: short yaw nudge left/right
+    STRAFE = auto()       # new: short lateral strafe left/right
 
 class FlightState(Enum):
     """
@@ -60,14 +61,24 @@ class GestureAction:
     A mapped action coming out of GestureMapper.
 
     kind:
-      - One of GestureActionType (e.g., TAKEOFF, ALT_OFFSET, HOLD, etc.)
+      - One of GestureActionType (e.g., TAKEOFF, ALT_OFFSET, HOLD, STRAFE, etc.)
 
     dz:
       - For ALT_OFFSET, the desired altitude change in meters.
         Positive = climb, negative = descend.
-    """
+
+    vy:
+      - For STRAFE, lateral velocity (m/s) in NED (Y) axis.
+        Positive ≈ "right", negative ≈ "left" (we'll interpret consistently).
+
+    dyaw:
+      - For YAW_OFFSET, yaw offset in degrees (short override).
+        Positive = yaw right, negative = yaw left.
+    """    
     kind: GestureActionType
     dz: float = 0.0
+    vy: float = 0.0
+    dyaw: float = 0.0
 
 
 # ---------- Mapper ----------
@@ -186,6 +197,19 @@ class GestureMapper:
             if self.state != FlightState.IDLE:
                 # Fist in the air = land
                 return GestureAction(GestureActionType.LAND)
+            return GestureAction(GestureActionType.NONE)
+        
+        # ---------- POINT_LEFT / POINT_RIGHT ----------
+        if raw == RawGestureType.POINT_LEFT:
+            if self.state == FlightState.CAPTURING:
+                # Short yaw nudge left (~20 degrees)
+                return GestureAction(GestureActionType.YAW_OFFSET, dyaw=-20.0)
+            return GestureAction(GestureActionType.NONE)
+
+        if raw == RawGestureType.POINT_RIGHT:
+            if self.state == FlightState.CAPTURING:
+                # Short yaw nudge right (~20 degrees)
+                return GestureAction(GestureActionType.YAW_OFFSET, dyaw=+20.0)
             return GestureAction(GestureActionType.NONE)
 
         # Fallback
