@@ -5,7 +5,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from vision.semantic_vision import (
+from .vision.semantic_vision import (
     SemanticPerception,
     SemanticFrame,
     CLIPOnnxEmbedder,
