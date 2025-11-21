@@ -5,7 +5,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from .vision.semantic_vision import (
+from vision.semantic_vision import (
     SemanticPerception,
     SemanticFrame,
     CLIPOnnxEmbedder,
@@ -212,7 +212,7 @@ class PlannerAgent:
         novelty = max(0.0, min(1.0, dist / 2.0))
         return novelty
 
-    def _pick_primary_subject(self, subjects: List) -> Optional:
+    def _pick_primary_subject(self, subjects: List[object]) -> Optional[object]:
         """
         Choose the most photogenically interesting subject.
 
