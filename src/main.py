@@ -213,9 +213,9 @@ def run_local(cfg: Config, args):
             action = mapper.map(raw_gesture)
 
             # NBV decision
-            emb = planner.embed(frame)
-            decision = planner.decide(emb, tel.heading_deg, tel.battery)
-            planner.update_history(emb)
+            sf = planner.analyze_frame(frame)
+            decision = planner.decide(sf, tel.heading_deg, tel.battery)
+            planner.update_history(sf, tel.heading_deg)
 
             # OSD
             cv2.putText(
@@ -227,6 +227,7 @@ def run_local(cfg: Config, args):
                 (255, 255, 255),
                 2,
             )
+
 
             # Novelty-gated capture + dedupe
             now = time.time()
@@ -359,9 +360,9 @@ async def run_sitl(cfg: Config, args):
                 print(f"[GESTURE] {raw_gesture} → {action.kind.name} | {before.name} → {mapper.state.name}")
 
             # NBV decision
-            emb = planner.embed(frame)
-            decision = planner.decide(emb, tel.heading_deg, tel.battery)
-            planner.update_history(emb)
+            sf = planner.analyze_frame(frame)
+            decision = planner.decide(sf, tel.heading_deg, tel.battery)
+            planner.update_history(sf, tel.heading_deg)
 
             # OSD
             cv2.putText(

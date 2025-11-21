@@ -1,97 +1,237 @@
 from __future__ import annotations
-import time
+
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import List, Optional
 
-
-import cv2
 import numpy as np
-import torch
-import torchvision.models as models
-import torchvision.transforms as T
-from dataclasses import dataclass
-import math
 
-from .utils.math import wrap_angle_deg
-
-from .utils.math import wrap_angle_deg
-
-
-# Simple NBV scoring = novelty(embedding vs history) - cost(turn + energy)
-# Replace with your decision graph later.
+from .vision.semantic_vision import (
+    SemanticPerception,
+    SemanticFrame,
+    CLIPOnnxEmbedder,
+    YoloOnnxDetector,
+    MeanColorEmbedder,
+    NoOpDetector,
+)
 
 
 @dataclass
 class NBVDecision:
+    """
+    Output of PlannerAgent.decide(...).
+
+    heading_delta_deg:
+        How much to change yaw this cycle (positive ≈ "turn right").
+
+    novelty_score:
+        Scalar [0,1] used by the main loop to gate captures.
+        Higher = more novel.
+
+    primary_label:
+        Label of the primary subject, or None.
+
+    debug:
+        String for on-screen / log debugging.
+    """
     heading_delta_deg: float
     novelty_score: float
-    cost_score: float
+    primary_label: Optional[str]
+    debug: str = ""
 
 
 class PlannerAgent:
-    def __init__(self, device: Optional[str] = None):
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT).to(self.device)
-        self.model.eval()
-        self.tf = T.Compose([
-            T.ToTensor(),
-            T.Resize((224, 224)),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-        self.emb_history: List[np.ndarray] = []
-        self.step = 0  # for exploration schedule
+    """
+    Phase 2D semantic NBV planner.
 
+    Responsibilities:
+      - Compute semantic embedding of each frame.
+      - Detect subjects (person/car/structure).
+      - Track history of embeddings + poses.
+      - Propose heading deltas that:
+          * keep interesting subjects centered
+          * encourage semantic novelty
+          * remain smooth for SITL offboard control
+    """
 
+    def __init__(self) -> None:
+        # Semantic perception stack
+        try:
+            embedder = CLIPOnnxEmbedder("models/clip_image.onnx")
+        except Exception as e:
+            print(f"[NBV] CLIP embedder init failed: {e}. Using MeanColorEmbedder.")
+            embedder = MeanColorEmbedder()
 
-    @torch.inference_mode()
-    def embed(self, frame_bgr: np.ndarray) -> np.ndarray:
-        x = self.tf(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).unsqueeze(0).to(self.device)
-        feat = self.model(x).detach().cpu().numpy()[0]
-        # L2-normalize
-        n = np.linalg.norm(feat) + 1e-6
-        return feat / n
+        try:
+            detector = YoloOnnxDetector(
+                "models/yolo_nano.onnx",
+                class_map={0: "person", 1: "car", 2: "truck", 3: "bus", 4: "building"},
+            )
+        except Exception as e:
+            print(f"[NBV] YOLO detector init failed: {e}. Using NoOpDetector.")
+            detector = NoOpDetector()
 
+        self.perception = SemanticPerception(embedder=embedder, detector=detector)
 
-    def score_novelty(self, emb: np.ndarray) -> float:
-        if not self.emb_history:
+        # History of past semantic frames & yaw (for novelty)
+        self._history: List[SemanticFrame] = []
+        self._yaw_history: List[float] = []
+        self.max_history = 100
+
+    # ---------- Public API used by main.py ----------
+
+    def analyze_frame(self, frame_bgr) -> SemanticFrame:
+        """
+        Run semantic perception on a frame.
+        """
+        return self.perception.analyze(frame_bgr)
+
+    def update_history(self, sf: SemanticFrame, yaw_deg: float) -> None:
+        """
+        Append embedding + yaw to history.
+        """
+        self._history.append(sf)
+        self._yaw_history.append(float(yaw_deg))
+
+        if len(self._history) > self.max_history:
+            self._history.pop(0)
+        if len(self._yaw_history) > self.max_history:
+            self._yaw_history.pop(0)
+
+    def decide(self, sf: SemanticFrame, yaw_deg: float, battery_pct: float) -> NBVDecision:
+        """
+        Main NBV decision function.
+
+        Arguments:
+            sf: SemanticFrame (embedding + subjects) for the current frame.
+            yaw_deg: current yaw/heading in degrees.
+            battery_pct: current battery level (0-100).
+
+        Returns:
+            NBVDecision with heading_delta_deg + novelty_score + debug info.
+        """
+        emb = sf.embedding
+        subjects = sf.subjects
+
+        novelty = self._compute_semantic_novelty(emb)
+        primary = self._pick_primary_subject(subjects)
+
+        # Base yaw step (deg). This is the "sweep" amount when nothing interesting.
+        base_step = 8.0
+
+        # If low battery, be more conservative (smaller sweeps).
+        if battery_pct < 30.0:
+            base_step = 5.0
+        if battery_pct < 15.0:
+            base_step = 3.0
+
+        # 1) If we have a primary subject, try to keep it centered.
+        #    Use its horizontal center to decide rotation direction.
+        heading_delta = 0.0
+        dbg_parts = []
+
+        if primary is not None:
+            cx, cy = primary.center
+            dbg_parts.append(f"subj={primary.label}@({cx:.2f},{cy:.2f}) a={primary.area:.2f}")
+
+            # If subject is off-center horizontally, rotate to re-center.
+            # NOTE: If the direction feels flipped in SITL, swap the signs.
+            off = cx - 0.5
+            if off < -0.05:
+                # subject left of center → yaw left (negative delta)
+                heading_delta = -base_step
+                dbg_parts.append("aim:center_left")
+            elif off > 0.05:
+                # subject right of center → yaw right (positive delta)
+                heading_delta = +base_step
+                dbg_parts.append("aim:center_right")
+            else:
+                # already fairly centered: small sweep for semantic variety
+                heading_delta = base_step * (1.0 if novelty > 0.5 else 0.5)
+                dbg_parts.append("aim:center_sweep")
+        else:
+            # 2) No detected subject: do a gentle sweep to explore.
+            heading_delta = base_step
+            dbg_parts.append("no_subject_sweep")
+
+        # Clamp the delta for smoothness
+        heading_delta = float(max(-20.0, min(20.0, heading_delta)))
+
+        dbg_parts.append(f"nov={novelty:.2f}")
+
+        return NBVDecision(
+            heading_delta_deg=heading_delta,
+            novelty_score=float(novelty),
+            primary_label=(primary.label if primary is not None else None),
+            debug=";".join(dbg_parts),
+        )
+
+    # ---------- Internals ----------
+
+    def _compute_semantic_novelty(self, emb: np.ndarray) -> float:
+        """
+        Compute semantic novelty of current embedding vs history.
+
+        Returns:
+            novelty in [0,1], where 1 ~ very novel, 0 ~ identical to past.
+        """
+        if emb is None or emb.size == 0:
+            return 0.0
+        if not self._history:
             return 1.0
-        sims = [float(np.dot(emb, e)) for e in self.emb_history[-16:]]
-        # lower similarity → higher novelty
-        return float(1.0 - max(sims))
 
+        # Cosine distance to most similar past embedding
+        e = emb.astype(np.float32).reshape(-1)
+        e_norm = np.linalg.norm(e)
+        if e_norm == 0:
+            return 0.0
+        e = e / e_norm
 
-    def score_cost(self, heading_delta_deg: float, battery: float) -> float:
-        turn_cost = abs(heading_delta_deg) / 180.0
-        energy_cost = (1.0 - battery)
-        return 0.5 * turn_cost + 0.5 * energy_cost
+        max_sim = -1.0
+        for past_sf in self._history[-30:]:  # look at last 30 shots
+            p = past_sf.embedding.astype(np.float32).reshape(-1)
+            p_norm = np.linalg.norm(p)
+            if p_norm == 0:
+                continue
+            p = p / p_norm
+            sim = float(np.dot(e, p))
+            if sim > max_sim:
+                max_sim = sim
 
+        if max_sim < 0:
+            return 1.0
 
-    def decide(self, emb: np.ndarray, curr_heading_deg: float, battery: float) -> NBVDecision:
-        self.step += 1
-        candidates = np.linspace(-45, 45, 13)  # tighten for smoothness
+        dist = 1.0 - max_sim  # cosine distance
+        # map [0,2] -> [0,1], clamp
+        novelty = max(0.0, min(1.0, dist / 2.0))
+        return novelty
 
-        novelty = self.score_novelty(emb)
+    def _pick_primary_subject(self, subjects: List) -> Optional:
+        """
+        Choose the most photogenically interesting subject.
 
-        # --- ε-greedy exploration ---
-        # shrink epsilon over time, floor at 0.05
-        eps = max(0.05, 0.25 * math.exp(-self.step / 350.0))  # slightly more eager exploration, faster decay
-        if novelty < 0.05 or np.random.rand() < eps:
-            # gentle oscillation to induce parallax & new content
-            # alternate left/right every ~2s assuming ~20 Hz loop
-            swing_amp = 15.0                                      # a bit larger motion to change the view
-            swing = swing_amp * (1 if (self.step // 40) % 2 == 0 else -1)
-            return NBVDecision(heading_delta_deg=wrap_angle_deg(swing), novelty_score=novelty, cost_score=self.score_cost(swing, battery))
+        Priority:
+          1. person
+          2. car
+          3. structure
+          4. other with large area
+        """
+        if not subjects:
+            return None
 
-        best, best_score, best_cost = 0.0, -1e9, 0.0
-        for d in candidates:
-            cost = self.score_cost(d, battery)
-            score = 2.0 * novelty - 1.0 * cost
-            if score > best_score:
-                best, best_score, best_cost = d, score, cost
+        # Split by label
+        persons = [s for s in subjects if s.label == "person"]
+        cars = [s for s in subjects if s.label == "car"]
+        structs = [s for s in subjects if s.label == "structure"]
+        others = [s for s in subjects if s.label not in ("person", "car", "structure")]
 
-        return NBVDecision(heading_delta_deg=wrap_angle_deg(best), novelty_score=novelty, cost_score=best_cost)
+        def pick_largest(ls):
+            if not ls:
+                return None
+            return max(ls, key=lambda s: s.area * s.score)
 
-    def update_history(self, emb: np.ndarray):
-        self.emb_history.append(emb)
-        if len(self.emb_history) > 256:
-            self.emb_history = self.emb_history[-256:]
+        for group in (persons, cars, structs, others):
+            cand = pick_largest(group)
+            if cand is not None and cand.area > 0.01:
+                return cand
+
+        return None
