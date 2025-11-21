@@ -37,6 +37,9 @@ def parse_args():
                     help="Webcam index; -1 = headless dummy frame")
     ap.add_argument("--takeoff", type=float, default=3.0,
                     help="Takeoff altitude (m) in SITL")
+    ap.add_argument("--semantic-nbv", type=int, default=1, 
+                    help="Enable semantic NBV (CLIP+YOLO). 1=on, 0=off",
+)
     return ap.parse_args()
 
 
@@ -171,7 +174,7 @@ def run_local(cfg: Config, args):
                         "Try --camera 1 (or -1 for headless)."
                     )
 
-        planner = PlannerAgent()
+        planner = PlannerAgent(semantic_enabled=cfg.semantic_nbv)
         gestures = GestureController(enable=bool(args.use_gestures))  # ONNX-based inside
         dedupe = ShotDeduper()
         mapper = GestureMapper()
@@ -227,7 +230,6 @@ def run_local(cfg: Config, args):
                 (255, 255, 255),
                 2,
             )
-
 
             # Novelty-gated capture + dedupe
             now = time.time()
@@ -528,6 +530,7 @@ async def run_sitl(cfg: Config, args):
 def main():
     args = parse_args()
     cfg = Config()
+    cfg.semantic_nbv = bool(args.semantic_nbv)
     if int(args.use_sitl) == 1:
         asyncio.run(run_sitl(cfg, args))
     else:

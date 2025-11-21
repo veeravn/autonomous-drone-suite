@@ -14,6 +14,7 @@ class Config:
     w_turn_cost: float = 1.0
     w_energy_cost: float = 1.0
     w_geo_penalty: float = 3.0
+    semantic_nbv: bool = True
 
     # Dedupe
     phash_thresh: float = 0.12

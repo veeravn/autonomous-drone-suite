@@ -53,7 +53,9 @@ class PlannerAgent:
           * remain smooth for SITL offboard control
     """
 
-    def __init__(self) -> None:
+    def __init__(self, semantic_enabled: bool = True) -> None:
+        self.semantic_enabled = semantic_enabled
+
         # Semantic perception stack
         try:
             embedder = CLIPOnnxEmbedder("models/clip_image.onnx")
@@ -70,9 +72,14 @@ class PlannerAgent:
             print(f"[NBV] YOLO detector init failed: {e}. Using NoOpDetector.")
             detector = NoOpDetector()
 
+        # If semantic NBV is disabled, force a simple perception stack:
+        if not self.semantic_enabled:
+            print("[NBV] Semantic NBV disabled via flag; using simple perception.")
+            embedder = MeanColorEmbedder()
+            detector = NoOpDetector()
+
         self.perception = SemanticPerception(embedder=embedder, detector=detector)
 
-        # History of past semantic frames & yaw (for novelty)
         self._history: List[SemanticFrame] = []
         self._yaw_history: List[float] = []
         self.max_history = 100
@@ -113,7 +120,7 @@ class PlannerAgent:
         subjects = sf.subjects
 
         novelty = self._compute_semantic_novelty(emb)
-        primary = self._pick_primary_subject(subjects)
+        primary = self._pick_primary_subject(subjects) if self.semantic_enabled else None
 
         # Base yaw step (deg). This is the "sweep" amount when nothing interesting.
         base_step = 8.0
