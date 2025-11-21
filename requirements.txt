@@ -2,7 +2,7 @@
 
 # Core
 
-numpy<2
+numpy
 opencv-python
 opencv-python-headless
 pillow
