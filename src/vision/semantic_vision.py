@@ -97,8 +97,14 @@ class MeanColorEmbedder(EmbeddingModel):
 
 class CLIPOnnxEmbedder(EmbeddingModel):
     """
-    ONNX-based image embedder (CLIP-like).
-    If model load fails, falls back to MeanColorEmbedder.
+    ONNX-based CLIP embedder that works with sayantan47/clip-vit-b32-onnx
+    `onnx/model_fp16.onnx`.
+
+    - Handles multi-input (text + image) CLIP graphs.
+    - Picks the 4D image input (usually 'pixel_values').
+    - Picks an image-related output (prefers 'image_embeds', else 'logits_per_image').
+    - Disables graph optimizations to avoid fusion bugs.
+    - If anything fails, falls back to MeanColorEmbedder.
     """
 
     def __init__(
@@ -108,22 +114,92 @@ class CLIPOnnxEmbedder(EmbeddingModel):
         device: str = "cpu",
     ) -> None:
         self._fallback = MeanColorEmbedder()
+        self.session = None
+        self.image_input_name: Optional[str] = None
+        self.extra_feeds: dict[str, np.ndarray] = {}
+        self.output_name: Optional[str] = None
+        self.input_size = input_size
 
         if not _HAS_ORT:
             print("[SEMANTIC] onnxruntime not available; using MeanColorEmbedder.")
-            self.session = None
             return
 
         try:
+            # IMPORTANT: turn OFF graph optimizations to avoid the error you saw.
+            so = ort.SessionOptions()
+            so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+
             providers = ["CPUExecutionProvider"]
             if device.lower() == "cuda":
                 providers.insert(0, "CUDAExecutionProvider")
 
-            self.session = ort.InferenceSession(model_path, providers=providers)
-            self.input_name = self.session.get_inputs()[0].name
-            self.output_name = self.session.get_outputs()[0].name
-            self.input_size = input_size
+            self.session = ort.InferenceSession(
+                model_path,
+                sess_options=so,
+                providers=providers,
+            )
+
+            inputs = self.session.get_inputs()
+            outputs = self.session.get_outputs()
+
+            # ---- Pick image input ----
+            image_input = None
+            for inp in inputs:
+                name = inp.name
+                # Replace dynamic dims ('batch', 'channels', etc.) with 1 for shape logic
+                shape = [d if isinstance(d, int) else 1 for d in inp.shape]
+                # Prefer 4D inputs (N,C,H,W) and names that sound like images
+                if len(shape) == 4 and (image_input is None or "pixel" in name.lower()):
+                    image_input = inp
+
+            if image_input is None:
+                print("[SEMANTIC] CLIP ONNX: no 4D/pixel input found; using fallback.")
+                self.session = None
+                return
+
+            self.image_input_name = image_input.name
+
+            # ---- Prepare zero feeds for non-image inputs (e.g. text) ----
+            extra_feeds: dict[str, np.ndarray] = {}
+            for inp in inputs:
+                if inp.name == self.image_input_name:
+                    continue
+
+                shape = [d if isinstance(d, int) else 1 for d in inp.shape]
+                onnx_type = getattr(inp, "type", "tensor(float)")  # e.g. "tensor(int64)"
+
+                if "int64" in onnx_type:
+                    dtype = np.int64
+                else:
+                    # default to float32 for everything else
+                    dtype = np.float32
+
+                extra_feeds[inp.name] = np.zeros(shape, dtype=dtype)
+
+            self.extra_feeds = extra_feeds
+
+            # ---- Pick an appropriate output ----
+            out_name = None
+            for out in outputs:
+                n = out.name.lower()
+                if "image_embeds" in n:
+                    out_name = out.name
+                    break
+            if out_name is None:
+                for out in outputs:
+                    n = out.name.lower()
+                    if "logits_per_image" in n:
+                        out_name = out.name
+                        break
+            if out_name is None:
+                out_name = outputs[0].name
+
+            self.output_name = out_name
+
             print(f"[SEMANTIC] CLIPOnnxEmbedder loaded from {model_path}")
+            print(f"[SEMANTIC]   image_input = {self.image_input_name}")
+            print(f"[SEMANTIC]   output      = {self.output_name}")
+
         except Exception as e:
             print(f"[SEMANTIC] Failed to load CLIP ONNX model: {e}")
             self.session = None
@@ -134,10 +210,10 @@ class CLIPOnnxEmbedder(EmbeddingModel):
         img_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         img = img_rgb.astype(np.float32) / 255.0
 
-        # Basic normalization; replace with CLIP mean/std if desired
-        # mean = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
-        # std  = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
-        # img = (img - mean) / std
+        # CLIP-style normalization
+        mean = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
+        std = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
+        img = (img - mean) / std
 
         img = img.transpose(2, 0, 1)[None, ...]  # (1,3,H,W)
         return img
@@ -147,9 +223,14 @@ class CLIPOnnxEmbedder(EmbeddingModel):
             return self._fallback.embed(frame_bgr)
 
         try:
-            inp = self._preprocess(frame_bgr)
-            out = self.session.run([self.output_name], {self.input_name: inp})[0]
+            inp_img = self._preprocess(frame_bgr)
+            feeds = {self.image_input_name: inp_img}
+            feeds.update(self.extra_feeds)
+
+            out = self.session.run([self.output_name], feeds)[0]
             emb = np.array(out).reshape(-1).astype(np.float32)
+
+            # L2 normalize
             norm = np.linalg.norm(emb)
             if norm > 0:
                 emb /= norm
@@ -157,7 +238,6 @@ class CLIPOnnxEmbedder(EmbeddingModel):
         except Exception as e:
             print(f"[SEMANTIC] CLIP embedding failed: {e}")
             return self._fallback.embed(frame_bgr)
-
 
 class NoOpDetector(ObjectDetector):
     """

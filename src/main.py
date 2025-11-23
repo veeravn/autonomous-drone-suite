@@ -9,6 +9,7 @@ import time
 import cv2
 import numpy as np
 from dotenv import load_dotenv
+from safety import SafetyConfig, SafetyManager
 
 from .config import Config
 from .planner_agent import PlannerAgent
@@ -38,111 +39,129 @@ def parse_args():
     ap.add_argument("--takeoff", type=float, default=3.0,
                     help="Takeoff altitude (m) in SITL")
     ap.add_argument("--semantic-nbv", type=int, default=1, 
-                    help="Enable semantic NBV (CLIP+YOLO). 1=on, 0=off",
-)
+                    help="Enable semantic NBV (CLIP+YOLO). 1=on, 0=off"),
+    ap.add_argument( "--safety", type=int, default=1,
+                    help="Enable safety constraints (1=on, 0=off).",
+    )
+    ap.add_argument( "--min-rel-alt", type=float, default=1.0,
+                    help="Minimum relative altitude (m) in offboard.",
+    )
+    ap.add_argument( "--max-rel-alt", type=float, default=15.0,
+                    help="Maximum relative altitude (m) in offboard.",
+    )
+    ap.add_argument("--rtl-battery", type=float, default=20.0,
+                    help="Battery percentage threshold for RTL.",
+    )
     return ap.parse_args()
 
 
 # ---------- Helpers for gesture actions ----------
-
 async def apply_gesture_action(
     mav: MavsdkClient,
     state: FlightState,
     action,
     tel,
     takeoff_alt: float,
+    safety=None
 ) -> FlightState:
     """
-    Map a high-level gesture action into MAVSDK commands + state transitions.
-    Altitude changes use discrete climbs only; main loop does yaw-only setpoints.
+    Safety-aware gesture→flight action mapper.
+    Handles:
+      - Altitude clamps
+      - Battery-based RTL (optional)
+      - Gesture-based flight state transitions
     """
 
     kind = action.kind
 
-    # TAKEOFF (rarely used if we auto-takeoff at start)
-    if kind == GestureActionType.TAKEOFF:
+    # ------------------------------
+    # SAFETY: Battery-based RTL
+    # ------------------------------
+    if safety is not None:
+        if safety.should_rtl(float(tel.battery), state):
+            print(f"[SAFETY] Battery low ({tel.battery:.1f}%), initiating RTL.")
+            try:
+                await mav.rtl()
+            except Exception:
+                await mav.sys.action.return_to_launch()
+            return FlightState.RTL
+
+    # ------------------------------
+    # TAKEOFF (THUMB_UP from IDLE)
+    # ------------------------------
+    if kind == "TAKEOFF":
         if state == FlightState.IDLE:
-            await mav.arm_and_takeoff(rel_alt_m=takeoff_alt)
-            await mav.start_offboard()
-            run_sitl.alt_target = float(takeoff_alt)
-            await mav.climb_to_alt(run_sitl.alt_target, vz_m_s=-0.8, max_seconds=12.0)
+            print("[GESTURE] TAKEOFF triggered")
+            await mav.takeoff(takeoff_alt)
             return FlightState.CAPTURING
         return state
 
-    # ALTITUDE OFFSET
-    if kind == GestureActionType.ALT_OFFSET:
-        # Only allow discrete altitude changes while actively capturing.
-        # If we're PAUSE/HOLD, IDLE, RTL, etc., ignore this gesture.
-        if state != FlightState.CAPTURING:
-            return state
-
-        # Discrete altitude change: update target, then single climb
-        new_target = max(0.5, float(tel.alt) + float(action.dz))
-        if abs(new_target - float(tel.alt)) < 0.10:  # ignore tiny changes
-            return state
-
-        run_sitl.alt_target = new_target
-        print(f"[ALT CMD] → {run_sitl.alt_target:.2f} m")
-
-        await mav.climb_to_alt(
-            run_sitl.alt_target,
-            vz_m_s=(-0.7 if action.dz > 0 else +0.5),
-            max_seconds=8.0,
-        )
-        return state
-
-    # HOLD (pause offboard)
-    if kind == GestureActionType.HOLD:
-        await mav.stop_offboard()
-        return FlightState.PAUSE
-
-    # RESUME (restart offboard)
-    if kind == GestureActionType.RESUME:
-        await mav.start_offboard()
-        return FlightState.CAPTURING
-
-    # LAND
-    if kind == GestureActionType.LAND:
-        await mav.stop_offboard()
-        await mav.sys.action.land()
+    # ------------------------------
+    # LAND (FIST)
+    # ------------------------------
+    if kind == "LAND":
+        print("[GESTURE] LAND requested")
+        try:
+            await mav.land()
+        except AttributeError:
+            await mav.sys.action.land()
         return FlightState.IDLE
 
-    # RTL
-    if kind == GestureActionType.RTL:
-        await mav.stop_offboard()
-        await mav.sys.action.return_to_launch()
-        return FlightState.RTL
-
-    # STRAFE: short lateral velocity burst
-    if kind == GestureActionType.STRAFE:
-        # Only strafe while actively capturing (Offboard running)
+    # ------------------------------
+    # ALTITUDE OFFSET (+ / -)
+    # ------------------------------
+    if kind == "ALT_OFFSET":
         if state != FlightState.CAPTURING:
             return state
 
-        # Configure a short strafe burst
-        dur = 1.0  # seconds
-        vy = float(action.vy)
+        # request new altitude (absolute)
+        requested = float(tel.alt) + float(action.dz)
 
-        # Attach to the run_sitl function object (like alt_target, _yaw_lp)
-        now = time.time()
-        setattr(run_sitl, "vy_cmd", vy)
-        setattr(run_sitl, "vy_until", now + dur)
+        # convert to RELATIVE (for safety)
+        rel = requested - takeoff_alt
+
+        if safety is not None:
+            rel = safety.clamp_altitude(rel)
+
+        # convert back to absolute altitude
+        final_alt = takeoff_alt + rel
+
+        print(f"[ALT CMD] → {final_alt:.2f} m")
+
+        try:
+            await mav.climb_to_alt(
+                final_alt,
+                vz_m_s=(-0.7 if action.dz > 0 else 0.5),
+                max_seconds=8.0
+            )
+        except RuntimeError as e:
+            print(f"[ALT] climb_to_alt error: {e}")
 
         return state
 
-    # YAW_OFFSET: short yaw nudge
-    if kind == GestureActionType.YAW_OFFSET:
+    # ------------------------------
+    # YAW OFFSET (POINT_LEFT/RIGHT)
+    # ------------------------------
+    if kind == "YAW_OFFSET":
         if state != FlightState.CAPTURING:
             return state
 
-        dur = 1.5  # seconds
-        dyaw = float(action.dyaw)
-
-        now = time.time()
-        setattr(run_sitl, "dyaw", dyaw)
-        setattr(run_sitl, "yaw_until", now + dur)
-
+        dyaw = action.dyaw_deg
+        # You already have yaw_rate in your mavsdk client
+        await mav.yaw_offset(dyaw)
         return state
+
+    # ------------------------------
+    # HOLD / PAUSE (OPEN PALM)
+    # ------------------------------
+    if kind == "HOLD":
+        print("[GESTURE] HOLD")
+        return FlightState.PAUSE
+
+    # RESUME (maybe PEACE gesture mapped earlier)
+    if kind == "RESUME":
+        print("[GESTURE] RESUME")
+        return FlightState.CAPTURING
 
     return state
 
@@ -322,6 +341,15 @@ async def run_sitl(cfg: Config, args):
 
         from mavsdk.offboard import VelocityNedYaw
 
+        safety = SafetyManager(
+            SafetyConfig(
+                min_rel_alt_m=cfg.min_rel_alt_m,
+                max_rel_alt_m=cfg.max_rel_alt_m,
+                rtl_battery_pct=cfg.rtl_battery_pct,
+                enabled=cfg.safety_enabled,
+            )
+        )
+
         while True:
             # Frame
             if cap is None:
@@ -345,6 +373,22 @@ async def run_sitl(cfg: Config, args):
             if tel is None:
                 await asyncio.sleep(0.05)
                 continue
+            
+            safety.maybe_set_home(tel)
+
+            # ---- Safety: Battery-based RTL ----
+            if safety.cfg.enabled and safety.should_rtl(tel.battery, mapper.state):
+                print(f"[SAFETY] Battery {tel.battery:.1f}% <= {safety.cfg.rtl_battery_pct}%, initiating RTL.")
+                try:
+                    # Assuming your MAVSDK client has an rtl() helper; if not, call sys.action.return_to_launch()
+                    await mav.rtl()
+                except AttributeError:
+                    # Fallback to raw MAVSDK if helper not present
+                    await mav.sys.action.return_to_launch()
+
+                mapper.state = FlightState.RTL
+                # Option: break out of loop once RTL is requested
+                # break
 
             # Gestures (ONNX)
             raw_gesture = gestures.detect(frame)
@@ -356,7 +400,7 @@ async def run_sitl(cfg: Config, args):
                 before = mapper.state
                 mapper.set_state(
                     await apply_gesture_action(
-                        mav, mapper.state, action, tel, takeoff_alt=float(args.takeoff)
+                        mav, mapper.state, action, tel, takeoff_alt=float(args.takeoff), safety=safety
                     )
                 )
                 print(f"[GESTURE] {raw_gesture} → {action.kind.name} | {before.name} → {mapper.state.name}")
@@ -461,6 +505,7 @@ async def run_sitl(cfg: Config, args):
                         mapper.type_to_action(GestureActionType.HOLD),
                         tel,
                         float(args.takeoff),
+                        safety=safety
                     )
                 )
             elif k == ord("r"):  # resume
@@ -471,6 +516,7 @@ async def run_sitl(cfg: Config, args):
                         mapper.type_to_action(GestureActionType.RESUME),
                         tel,
                         float(args.takeoff),
+                        safety=safety
                     )
                 )
             elif k == ord("u"):  # ascend
@@ -481,6 +527,7 @@ async def run_sitl(cfg: Config, args):
                         mapper.type_to_action(GestureActionType.ALT_OFFSET, dz=+0.8),
                         tel,
                         float(args.takeoff),
+                        safety=safety
                     )
                 )
             elif k == ord("d"):  # descend
@@ -491,6 +538,7 @@ async def run_sitl(cfg: Config, args):
                         mapper.type_to_action(GestureActionType.ALT_OFFSET, dz=-0.6),
                         tel,
                         float(args.takeoff),
+                        safety=safety
                     )
                 )
             elif k == ord("l"):  # land
@@ -501,6 +549,7 @@ async def run_sitl(cfg: Config, args):
                         mapper.type_to_action(GestureActionType.LAND),
                         tel,
                         float(args.takeoff),
+                        safety=safety
                     )
                 )
 
@@ -531,6 +580,10 @@ def main():
     args = parse_args()
     cfg = Config()
     cfg.semantic_nbv = bool(args.semantic_nbv)
+    cfg.safety_enabled = bool(args.safety)
+    cfg.min_rel_alt_m = float(args.min_rel_alt)
+    cfg.max_rel_alt_m = float(args.max_rel_alt)
+    cfg.rtl_battery_pct = float(args.rtl_battery)
     if int(args.use_sitl) == 1:
         asyncio.run(run_sitl(cfg, args))
     else:

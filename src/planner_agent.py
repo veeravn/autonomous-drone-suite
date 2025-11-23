@@ -58,7 +58,7 @@ class PlannerAgent:
 
         # Semantic perception stack
         try:
-            embedder = CLIPOnnxEmbedder("models/clip_image.onnx")
+            embedder = CLIPOnnxEmbedder("models/model_fp16.onnx")
         except Exception as e:
             print(f"[NBV] CLIP embedder init failed: {e}. Using MeanColorEmbedder.")
             embedder = MeanColorEmbedder()

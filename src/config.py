@@ -5,6 +5,13 @@ LatLon = Tuple[float, float]
 
 @dataclass
 class Config:
+   
+   #Safety
+    safety_enabled: bool = True
+    min_rel_alt_m: float = 1.0
+    max_rel_alt_m: float = 15.0
+    rtl_battery_pct: float = 20.0
+    
     # Video / capture
     camera_index: int = 0
     capture_period_s: float = 1.0
