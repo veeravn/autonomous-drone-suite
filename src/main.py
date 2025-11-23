@@ -257,13 +257,53 @@ def run_local(cfg: Config, args):
             # OSD
             cv2.putText(
                 frame,
-                f"state:LOCAL nov:{decision.novelty_score:.2f}",
+                f"state:{mapper.state.name} nov:{decision.novelty_score:.2f}",
                 (12, 22),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
                 (255, 255, 255),
                 2,
             )
+            # --- YOLO subject bounding box visualization ---
+            subj = getattr(decision, "subject", None)
+            if subj is not None and getattr(subj, "bbox_xyxy", None) is not None:
+                try:
+                    x1, y1, x2, y2 = subj.bbox_xyxy  # normalized [0,1]
+                    h, w = frame.shape[:2]
+                    x1_i = int(max(0, min(w - 1, x1 * w)))
+                    x2_i = int(max(0, min(w - 1, x2 * w)))
+                    y1_i = int(max(0, min(h - 1, y1 * h)))
+                    y2_i = int(max(0, min(h - 1, y2 * h)))
+
+                    # Draw rectangle around subject
+                    cv2.rectangle(
+                        frame,
+                        (x1_i, y1_i),
+                        (x2_i, y2_i),
+                        (0, 255, 0),  # green box
+                        2,
+                    )
+
+                    # Label text: class name + (optional) area %
+                    label = getattr(subj, "label", "obj")
+                    area = getattr(subj, "area", None)
+                    if area is not None:
+                        text = f"{label} {area*100:.1f}%"
+                    else:
+                        text = str(label)
+
+                    cv2.putText(
+                        frame,
+                        text,
+                        (x1_i, max(0, y1_i - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 255, 0),
+                        1,
+                    )
+                except Exception as e:
+                    # Don't let drawing bugs kill the loop
+                    print(f"[YOLO-OSD] Failed to draw subject bbox: {e}")
 
             # Novelty-gated capture + dedupe
             now = time.time()
