@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from safety import SafetyConfig, SafetyManager
 
 from .config import Config
+from .hw_logging import HardwareLogger, FrameLog
 from .planner_agent import PlannerAgent
 from .gesture_control import GestureController
 from .shot_dedupe import ShotDeduper
@@ -51,6 +52,9 @@ def parse_args():
     )
     ap.add_argument("--rtl-battery", type=float, default=20.0,
                     help="Battery percentage threshold for RTL.",
+    )
+    ap.add_argument("--hardware", type=int, default=0,
+                    help="Use hardware (Pixhawk over serial) instead of SITL. 0=SITL, 1=hardware.",
     )
     return ap.parse_args()
 
@@ -331,8 +335,16 @@ async def run_sitl(cfg: Config, args):
         dedupe = ShotDeduper()
         mapper = GestureMapper()
 
-        mav = MavsdkClient(DEF_MAVSDK)
-        print(f"[MAVSDK] Connecting to {DEF_MAVSDK}")
+        # ---- Connection URL selection (SITL vs hardware) ----
+        if int(getattr(args, "hardware", 0)) == 1:
+            # Hardware mode: Pixhawk via USB serial (adjust device/baud to your setup)
+            conn_url = "serial:///dev/ttyACM0:57600"
+        else:
+            # Default: SITL
+            conn_url = DEF_MAVSDK
+
+        mav = MavsdkClient(conn_url)
+        print(f"[MAVSDK] Connecting to {conn_url}")
         await mav.connect()
 
         # Auto takeoff → start offboard → discrete climb to altitude
@@ -360,6 +372,7 @@ async def run_sitl(cfg: Config, args):
                 enabled=cfg.safety_enabled,
             )
         )
+        logger = HardwareLogger(enabled=True)
 
         while True:
             # Frame
@@ -535,6 +548,8 @@ async def run_sitl(cfg: Config, args):
 
             # Novelty-gated capture + dedupe
             now = time.time()
+            capture_triggered = False
+            dedupe_skipped = False
             if (
                 mapper.state == FlightState.CAPTURING
                 and now - t_last_capture > cfg.capture_period_s
@@ -545,9 +560,40 @@ async def run_sitl(cfg: Config, args):
                     dedupe.add(frame, pos)
                     cv2.imwrite(f"data/images/cap_{int(now)}.jpg", frame)
                     print("Saved unique shot")
+                    capture_triggered = True
                 else:
                     print("Duplicate shot skipped")
+                    capture_triggered = True
+                    dedupe_skipped = True
                 t_last_capture = now
+
+            # ---- Hardware / SITL logging ----
+            if logger is not None:
+                subj = decision.subject  # depending on how you named it
+                subj_label = getattr(subj, "label", None) if subj is not None else None
+                subj_center = getattr(subj, "center", None) if subj is not None else None
+                subj_area = getattr(subj, "area", None) if subj is not None else None
+
+                rec = FrameLog(
+                    t_sec=time.time(),
+                    alt=float(tel.alt),
+                    lat=float(tel.lat),
+                    lon=float(tel.lon),
+                    heading_deg=float(tel.heading_deg),
+                    battery_pct=float(tel.battery),
+                    state=mapper.state.name,
+                    hardware=bool(getattr(args, "hardware", 0)),
+                    gesture_raw=str(raw_gesture.name if hasattr(raw_gesture, "name") else raw_gesture),
+                    gesture_action=str(action.kind.name if hasattr(action, "kind") else None),
+                    novelty_score=float(decision.novelty_score),
+                    heading_delta_deg=float(decision.heading_delta_deg),
+                    subject_label=subj_label,
+                    subject_center=subj_center,
+                    subject_area=subj_area,
+                    capture_triggered=capture_triggered,
+                    dedupe_skipped=dedupe_skipped,
+                )
+                logger.log_frame(rec)
 
             # Window + keyboard fallbacks
             cv2.imshow("MVP Feed (SITL)", frame)
@@ -627,6 +673,11 @@ async def run_sitl(cfg: Config, args):
             pass
         try:
             cv2.destroyAllWindows()
+        except Exception:
+            pass
+        try:
+            if logger is not None:
+                logger.close()
         except Exception:
             pass
 

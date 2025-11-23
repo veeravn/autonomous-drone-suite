@@ -1,0 +1,17 @@
+[Unit]
+Description=Autonomous Drone Suite Agent
+After=network.target
+
+[Service]
+Type=simple
+User=jetson
+Group=jetson
+# Adjust paths if REPO_DIR is different
+Environment=REPO_DIR=/opt/autonomous-drone-suite
+WorkingDirectory=/opt/autonomous-drone-suite
+ExecStart=/opt/autonomous-drone-suite/deploy/jetson/start_agent.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

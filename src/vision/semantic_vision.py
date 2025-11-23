@@ -10,7 +10,52 @@ try:
     import onnxruntime as ort
     _HAS_ORT = True
 except Exception:
+    ort = None
     _HAS_ORT = False
+
+
+def choose_ort_providers(device: str = "cpu") -> list[str]:
+    """
+    Choose ONNX Runtime providers based on what's actually available.
+
+    - On Jetson with TensorRT ORT, you may see 'TensorrtExecutionProvider' and 'CUDAExecutionProvider'.
+    - On desktop with GPU, you may see 'CUDAExecutionProvider'.
+    - Otherwise, we fall back to 'CPUExecutionProvider'.
+    """
+    if not _HAS_ORT:
+        return []
+
+    available = ort.get_available_providers()
+    device = (device or "cpu").lower()
+
+    preferred_order: list[str] = []
+
+    if device == "cuda":
+        # Prefer TensorRT if available, then CUDA, then CPU
+        preferred_order = [
+            "TensorrtExecutionProvider",
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+    else:
+        # CPU preference (but still allow TRT/CUDA if explicitly set)
+        preferred_order = [
+            "CPUExecutionProvider",
+            "CUDAExecutionProvider",
+            "TensorrtExecutionProvider",
+        ]
+
+    chosen: list[str] = []
+    for p in preferred_order:
+        if p in available:
+            chosen.append(p)
+
+    # Always fall back to CPU if nothing matched
+    if not chosen and "CPUExecutionProvider" in available:
+        chosen = ["CPUExecutionProvider"]
+
+    return chosen
+
 
 
 # ---------- Data models ----------
@@ -129,9 +174,11 @@ class CLIPOnnxEmbedder(EmbeddingModel):
             so = ort.SessionOptions()
             so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
 
-            providers = ["CPUExecutionProvider"]
-            if device.lower() == "cuda":
-                providers.insert(0, "CUDAExecutionProvider")
+            providers = choose_ort_providers(device=device)
+            if not providers:
+                print("[SEMANTIC] No ONNX Runtime providers available; using fallback embedder.")
+                self.session = None
+                return
 
             self.session = ort.InferenceSession(
                 model_path,
@@ -257,29 +304,33 @@ class YoloOnnxDetector(ObjectDetector):
     If initialization fails, this automatically falls back to NoOpDetector.
     """
 
-    def __init__(
-        self,
-        model_path: str,
-        class_map: dict[int, str],
-        score_threshold: float = 0.25,
-        device: str = "cpu",
-    ) -> None:
-        self.score_threshold = score_threshold
-        self.class_map = class_map
+    def __init__(self, model_path: str, device: str = "cpu") -> None:
+        self.session = None
+        self.input_name = None
+        self.output_names: list[str] = []
 
         if not _HAS_ORT:
-            print("[SEMANTIC] onnxruntime not available; using NoOpDetector.")
-            self.session = None
+            print("[SEMANTIC] onnxruntime not available; YOLO disabled.")
             return
 
         try:
-            providers = ["CPUExecutionProvider"]
-            if device.lower() == "cuda":
-                providers.insert(0, "CUDAExecutionProvider")
+            so = ort.SessionOptions()
+            so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
-            self.session = ort.InferenceSession(model_path, providers=providers)
-            self.input_name = self.session.get_inputs()[0].name
-            self.output_names = [o.name for o in self.session.get_outputs()]
+            providers = choose_ort_providers(device=device)
+            if not providers:
+                print("[SEMANTIC] No ORT providers available; YOLO disabled.")
+                return
+
+            self.session = ort.InferenceSession(
+                model_path,
+                sess_options=so,
+                providers=providers,
+            )
+            inputs = self.session.get_inputs()
+            outputs = self.session.get_outputs()
+            self.input_name = inputs[0].name
+            self.output_names = [o.name for o in outputs]
             print(f"[SEMANTIC] YoloOnnxDetector loaded from {model_path}")
         except Exception as e:
             print(f"[SEMANTIC] Failed to load YOLO ONNX model: {e}")

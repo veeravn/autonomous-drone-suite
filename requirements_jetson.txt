@@ -1,0 +1,44 @@
+###########################################################
+# Autonomous Drone Suite — Jetson Requirements (aarch64)
+# Mirrors requirements.txt but adapted for Jetson hardware.
+#
+# Key features:
+# - Avoids NumPy 2.x (breaks ORT + compiled extensions)
+# - Avoids PyPI Torch/TorchVision (Jetson needs NVIDIA wheels)
+# - Marks FAISS CPU as x86-only (not available on Jetson)
+# - Installs all other dependencies normally
+###########################################################
+
+########## Core Python stack ##########
+numpy<2.0.0
+scipy>=1.10.0,<1.13.0
+python-dotenv>=1.0.0,<2.0.0
+pyyaml>=6.0.0,<7.0.0
+tqdm>=4.65.0,<5.0.0
+
+########## Vision + image processing ##########
+opencv-python>=4.8.0,<4.10.0
+opencv-python-headless>=4.8.0,<4.10.0
+Pillow>=10.0.0,<11.0.0
+ImageHash>=4.3,<5.0
+
+########## MAVLink / PX4 ##########
+mavsdk>=1.8.0,<2.0.0
+
+########## ONNX Runtime (CLIP + YOLO inference) ##########
+# Start with CPU ORT on Jetson; later you may switch to:
+#   - onnxruntime-gpu (Jetson-specific wheel)
+#   - ORT built with TensorRT backend
+onnxruntime>=1.17.0,<2.0.0
+
+########## FAISS ##########
+# CPU FAISS does NOT build or install on Jetson.
+# This makes FAISS available on dev machines, skipped on Jetson.
+faiss-cpu; platform_machine != "aarch64"
+
+########## Torch + TorchVision ##########
+# DO NOT install PyPI torch on Jetson — use NVIDIA wheels.
+# These lines let pip skip torch unless running on Jetson
+# AND you provide the wheel URLs via install script.
+torch @ ${TORCH_WHL} ; platform_machine == "aarch64" and TORCH_WHL is not None
+torchvision @ ${TORCHVISION_WHL} ; platform_machine == "aarch64" and TORCHVISION_WHL is not None
