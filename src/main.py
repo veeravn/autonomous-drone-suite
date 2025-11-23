@@ -92,7 +92,15 @@ async def apply_gesture_action(
     if kind == "TAKEOFF":
         if state == FlightState.IDLE:
             print("[GESTURE] TAKEOFF triggered")
-            await mav.takeoff(takeoff_alt)
+
+            target = takeoff_alt
+            if safety is not None:
+                # convert to relative, clamp, convert back
+                rel = target - takeoff_alt
+                rel = safety.clamp_altitude(rel)
+                target = takeoff_alt + rel
+
+            await mav.takeoff(target)
             return FlightState.CAPTURING
         return state
 
@@ -113,9 +121,9 @@ async def apply_gesture_action(
     if kind == "ALT_OFFSET":
         if state != FlightState.CAPTURING:
             return state
-
         # request new altitude (absolute)
         requested = float(tel.alt) + float(action.dz)
+        rel = requested - takeoff_alt
 
         # convert to RELATIVE (for safety)
         rel = requested - takeoff_alt
@@ -125,6 +133,9 @@ async def apply_gesture_action(
 
         # convert back to absolute altitude
         final_alt = takeoff_alt + rel
+
+        if abs(final_alt - float(tel.alt)) < 0.10:
+            return state
 
         print(f"[ALT CMD] → {final_alt:.2f} m")
 
@@ -377,16 +388,21 @@ async def run_sitl(cfg: Config, args):
             safety.maybe_set_home(tel)
 
             # ---- Safety: Battery-based RTL ----
-            if safety.cfg.enabled and safety.should_rtl(tel.battery, mapper.state):
-                print(f"[SAFETY] Battery {tel.battery:.1f}% <= {safety.cfg.rtl_battery_pct}%, initiating RTL.")
+            if safety.cfg.enabled and safety.should_rtl(float(tel.battery), mapper.state):
+                print(
+                    f"[SAFETY] Battery {tel.battery:.1f}% "
+                    f"<= {safety.cfg.rtl_battery_pct}%, initiating RTL."
+                )
                 try:
-                    # Assuming your MAVSDK client has an rtl() helper; if not, call sys.action.return_to_launch()
                     await mav.rtl()
-                except AttributeError:
-                    # Fallback to raw MAVSDK if helper not present
+                except Exception:
                     await mav.sys.action.return_to_launch()
 
-                mapper.state = FlightState.RTL
+                mapper.set_state(FlightState.RTL)
+
+                # Skip NBV + gestures while RTL is active
+                await asyncio.sleep(0.5)
+                continue
                 # Option: break out of loop once RTL is requested
                 # break
 
@@ -437,6 +453,11 @@ async def run_sitl(cfg: Config, args):
                 if abs(delta) < 3.0:
                     delta = 3.0 if delta >= 0 else -3.0
 
+                # SAFETY: Damp yaw near minimum altitude
+                rel_alt = float(tel.alt) - float(args.takeoff)
+                if safety.cfg.enabled and rel_alt < safety.cfg.min_rel_alt_m + 0.5:
+                    delta *= 0.4  # reduce yaw aggressiveness when too low
+
                 target_yaw = tel.heading_deg + max(
                     -cfg.max_yaw_delta_deg, min(cfg.max_yaw_delta_deg, delta)
                 )
@@ -467,6 +488,42 @@ async def run_sitl(cfg: Config, args):
                     (255, 255, 255),
                     2,
                 )
+                # --- Safety overlay (always draw when safety available) ---
+                if safety is not None:
+                    rel_alt = float(tel.alt) - float(args.takeoff)
+
+                    cv2.putText(
+                        frame,
+                        f"SAFETY ALT rel:{rel_alt:.1f}m "
+                        f"[{safety.cfg.min_rel_alt_m:.1f}-{safety.cfg.max_rel_alt_m:.1f}]",
+                        (12, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 255, 255),
+                        1,
+                    )
+
+                    cv2.putText(
+                        frame,
+                        f"SAFETY BAT {tel.battery:.1f}% "
+                        f"(RTL @{safety.cfg.rtl_battery_pct:.1f}%)",
+                        (12, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 255, 255),
+                        1,
+                    )
+
+                    if not safety.cfg.enabled:
+                        cv2.putText(
+                            frame,
+                            "SAFETY: DISABLED",
+                            (12, 110),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            (0, 0, 255),
+                            2,
+                        )
 
                 try:
                     await mav.sys.offboard.set_velocity_ned(
