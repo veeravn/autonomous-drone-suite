@@ -15,7 +15,8 @@ set -euo pipefail
 #   TORCHVISION_WHL    - full URL/path to NVIDIA TorchVision wheel (for Jetson only)
 ###############################################
 
-REPO_DIR="${REPO_DIR:-/opt/autonomous-drone-suite}"
+# REPO_DIR="${REPO_DIR:-/opt/autonomous-drone-suite}"
+REPO_DIR="${REPO_DIR:-$HOME/autonomous-drone-suite}"
 
 echo "[INSTALL] Target repo directory: ${REPO_DIR}"
 
