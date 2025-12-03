@@ -21,6 +21,7 @@ from .utils.video import open_camera
 
 from .gestures.mapper import GestureMapper, GestureActionType, FlightState
 from .flight.mavsdk_client import MavsdkClient
+from .flight.mock_drone import MockDrone  # NEW
 
 load_dotenv()
 
@@ -56,6 +57,8 @@ def parse_args():
     ap.add_argument("--hardware", type=int, default=0,
                     help="Use hardware (Pixhawk over serial) instead of SITL. 0=SITL, 1=hardware.",
     )
+    ap.add_argument("--mock-drone", type=int, default=0,  # NEW
+                    help="Use MockDrone backend instead of real MAVSDK/PX4 (1=mock, 0=normal).")  # NEW
     return ap.parse_args()
 
 
@@ -351,6 +354,8 @@ async def run_sitl(cfg: Config, args):
       - Runs ONNX-based gestures via GestureController
       - Uses NBV for yaw-only offboard control
       - Captures unique shots via dedupe
+
+    With --mock-drone=1, uses MockDrone instead of a real PX4/MAVSDK backend.  # NEW
     """
     cap = None
     mav: MavsdkClient | None = None
@@ -375,17 +380,24 @@ async def run_sitl(cfg: Config, args):
         dedupe = ShotDeduper()
         mapper = GestureMapper()
 
-        # ---- Connection URL selection (SITL vs hardware) ----
-        if int(getattr(args, "hardware", 0)) == 1:
-            # Hardware mode: Pixhawk via USB serial (adjust device/baud to your setup)
-            conn_url = "serial:///dev/ttyACM0:57600"
-        else:
-            # Default: SITL
-            conn_url = DEF_MAVSDK
+        # ---- Backend selection: MockDrone vs real MAVSDK/PX4 ----  # NEW
+        use_mock = int(getattr(args, "mock_drone", 0)) == 1           # NEW
+        if use_mock:                                                  # NEW
+            mav = MockDrone()                                         # NEW
+            print("[MAVSDK] Using MockDrone backend (no PX4 connection).")  # NEW
+        else:                                                         # NEW
+            # ---- Connection URL selection (SITL vs hardware) ----
+            if int(getattr(args, "hardware", 0)) == 1:
+                # Hardware mode: Pixhawk via USB serial (adjust device/baud to your setup)
+                conn_url = "serial:///dev/ttyACM0:57600"
+            else:
+                # Default: SITL
+                conn_url = DEF_MAVSDK
 
-        mav = MavsdkClient(conn_url)
-        print(f"[MAVSDK] Connecting to {conn_url}")
-        await mav.connect()
+            mav = MavsdkClient(conn_url)
+            print(f"[MAVSDK] Connecting to {conn_url}")
+            await mav.connect()
+        # ---- end backend selection ----  # NEW
 
         # Auto takeoff → start offboard → discrete climb to altitude
         await mav.arm_and_takeoff(rel_alt_m=float(args.takeoff))
