@@ -2,111 +2,179 @@
 set -euo pipefail
 
 ###############################################
-# Smart Jetson Installer for Autonomous Drone Suite
+# Dual-Mode Jetson Installer for Autonomous Drone Suite
 #
-# - Detects Jetson (aarch64 + /etc/nv_tegra_release)
-# - Creates venv
-# - Installs requirements_jetson.txt if present
-# - Optionally installs NVIDIA PyTorch / TorchVision wheels
+# Usage:
+#   deploy/jetson/install.sh              # default: dev mode
+#   deploy/jetson/install.sh dev          # explicit dev mode
+#   sudo deploy/jetson/install.sh prod    # production mode
+#
+# Modes:
+#   dev  - operate in-place in current repo (no rsync, no sudo)
+#   prod - rsync code into REPO_DIR (default: /opt/autonomous-drone-suite)
 #
 # Env vars you can tweak:
-#   REPO_DIR           - target repo dir (default: /opt/autonomous-drone-suite)
+#   REPO_DIR           - target repo dir
+#                        dev: default = current working directory
+#                        prod: default = /opt/autonomous-drone-suite
 #   TORCH_WHL          - full URL/path to NVIDIA PyTorch wheel (for Jetson only)
 #   TORCHVISION_WHL    - full URL/path to NVIDIA TorchVision wheel (for Jetson only)
 ###############################################
 
-# REPO_DIR="${REPO_DIR:-/opt/autonomous-drone-suite}"
-REPO_DIR="${REPO_DIR:-$HOME/autonomous-drone-suite}"
+MODE="${1:-dev}"   # dev | prod
 
-echo "[INSTALL] Target repo directory: ${REPO_DIR}"
+echo "[INSTALL] Mode: ${MODE}"
 
-# --- Detect Jetson / architecture ---
-ARCH="$(uname -m || echo unknown)"
-JETSON=0
-if [[ "${ARCH}" == "aarch64" ]] && [[ -f /etc/nv_tegra_release ]]; then
-  JETSON=1
-  echo "[INSTALL] Detected Jetson platform (aarch64 + nv_tegra)."
-else
-  echo "[INSTALL] Non-Jetson platform detected (arch=${ARCH})."
+if [[ "${MODE}" != "dev" && "${MODE}" != "prod" ]]; then
+  echo "ERROR: MODE must be 'dev' or 'prod'"
+  echo "Usage: $0 [dev|prod]"
+  exit 1
 fi
 
-# --- Prepare repo directory ---
-sudo mkdir -p "${REPO_DIR}"
-sudo chown -R "$USER":"$USER" "${REPO_DIR}"
+###############################################
+# Detect Jetson
+###############################################
+ARCH="$(uname -m)"
+JETSON=0
+if [[ "${ARCH}" == "aarch64" && -f /etc/nv_tegra_release ]]; then
+  JETSON=1
+  echo "[INSTALL] Detected Jetson (aarch64 + /etc/nv_tegra_release)"
+else
+  echo "[INSTALL] Not a Jetson (arch=${ARCH})"
+fi
 
-# If we're running this from within a clone, copy the contents over
-if [ -d .git ] || [ -f "pyproject.toml" ] || [ -f "setup.cfg" ]; then
-  echo "[INSTALL] Copying current repo contents to ${REPO_DIR}"
-  rsync -a --exclude=".venv" --exclude=".git" ./ "${REPO_DIR}/"
+###############################################
+# Determine REPO_DIR
+###############################################
+if [[ "${MODE}" == "dev" ]]; then
+  # In dev mode we assume you're running inside the repo you cloned
+  REPO_DIR="${REPO_DIR:-$(pwd)}"
+  echo "[INSTALL] Dev mode: using in-place repo at ${REPO_DIR}"
+else
+  # Production install under /opt (override with REPO_DIR if you want)
+  REPO_DIR="${REPO_DIR:-/opt/autonomous-drone-suite}"
+  echo "[INSTALL] Prod mode: target repo dir ${REPO_DIR}"
+
+  # Ensure target dir exists and is owned by current user
+  if [[ ! -d "${REPO_DIR}" ]]; then
+    echo "[INSTALL] Creating ${REPO_DIR} (requires sudo)"
+    sudo mkdir -p "${REPO_DIR}"
+    sudo chown "$(id -u):$(id -g)" "${REPO_DIR}"
+  fi
+
+  # Rsync current repo into REPO_DIR (excluding venv & git metadata)
+  echo "[INSTALL] Syncing code to ${REPO_DIR}"
+  rsync -a --delete \
+    --exclude ".venv" \
+    --exclude ".git" \
+    ./ "${REPO_DIR}/"
 fi
 
 cd "${REPO_DIR}"
 
-# --- Create virtualenv ---
-if [ ! -d ".venv" ]; then
+###############################################
+# Python virtualenv
+###############################################
+if [[ ! -d ".venv" ]]; then
   echo "[INSTALL] Creating virtualenv at ${REPO_DIR}/.venv"
   python3 -m venv .venv
 else
   echo "[INSTALL] Reusing existing virtualenv at ${REPO_DIR}/.venv"
 fi
 
-# shellcheck disable=SC1091
+# shellcheck source=/dev/null
 source .venv/bin/activate
 
-echo "[INSTALL] Python: $(python --version)"
-echo "[INSTALL] Pip:    $(pip --version)"
+echo "[INSTALL] Upgrading pip/setuptools/wheel"
+pip install --upgrade pip setuptools wheel
 
-echo "[INSTALL] Upgrading pip / wheel / setuptools"
-pip install --upgrade pip wheel setuptools
-
-# --- Choose requirements file ---
-REQ_FILE="requirements_jetson.txt"
-if [ ! -f "${REQ_FILE}" ]; then
-  echo "[INSTALL] ${REQ_FILE} not found, falling back to requirements.txt"
-  REQ_FILE="requirements.txt"
+###############################################
+# Requirements selection
+###############################################
+REQ_FILE=""
+if [[ -f "requirements_jetson.txt" && "${JETSON}" -eq 1 ]]; then
+  REQ_FILE="requirements_jetson.txt"
+else
+  if [[ -f "requirements.txt" ]]; then
+    REQ_FILE="requirements.txt"
+  fi
 fi
 
-echo "[INSTALL] Using requirements file: ${REQ_FILE}"
+if [[ -n "${REQ_FILE}" ]]; then
+  echo "[INSTALL] Installing dependencies from ${REQ_FILE}"
+  pip install -r "${REQ_FILE}"
+else
+  echo "[INSTALL] WARNING: No requirements.txt or requirements_jetson.txt found."
+fi
 
-# --- Install base dependencies ---
-echo "[INSTALL] Installing base dependencies from ${REQ_FILE}"
-pip install -r "${REQ_FILE}"
-
-# --- Optional: Jetson-specific PyTorch / TorchVision ---
+###############################################
+# Optional: install NVIDIA PyTorch / TorchVision wheels
+###############################################
 if [[ "${JETSON}" -eq 1 ]]; then
-  echo "[INSTALL] Jetson mode: You can optionally install NVIDIA PyTorch / TorchVision wheels."
-
   if [[ -n "${TORCH_WHL:-}" ]]; then
-    echo "[INSTALL] Installing PyTorch from: ${TORCH_WHL}"
+    echo "[INSTALL] Installing PyTorch from ${TORCH_WHL}"
     pip install "${TORCH_WHL}"
   else
-    echo "[INSTALL] Skipping PyTorch (TORCH_WHL not set)."
-    echo "          Set TORCH_WHL to NVIDIA's wheel URL if you need torch on Jetson."
+    echo "[INSTALL] Skipping PyTorch wheel (set TORCH_WHL=... to install)"
   fi
 
   if [[ -n "${TORCHVISION_WHL:-}" ]]; then
-    echo "[INSTALL] Installing TorchVision from: ${TORCHVISION_WHL}"
+    echo "[INSTALL] Installing TorchVision from ${TORCHVISION_WHL}"
     pip install "${TORCHVISION_WHL}"
   else
-    echo "[INSTALL] Skipping TorchVision (TORCHVISION_WHL not set)."
-    echo "          Set TORCHVISION_WHL to NVIDIA's wheel URL if you need torchvision on Jetson."
+    echo "[INSTALL] Skipping TorchVision wheel (set TORCHVISION_WHL=... to install)"
   fi
 else
-  echo "[INSTALL] Non-Jetson platform: PyTorch / TorchVision, if needed, will be managed by ${REQ_FILE}."
+  echo "[INSTALL] Non-Jetson: not installing Jetson-specific torch wheels."
 fi
 
-echo "[INSTALL] Making start script executable"
-chmod +x deploy/jetson/start_agent.sh || true
+###############################################
+# Make start script executable
+###############################################
+if [[ -f "deploy/jetson/start_agent.sh" ]]; then
+  chmod +x deploy/jetson/start_agent.sh || true
+fi
 
+echo
 echo "[INSTALL] Done."
 echo
-echo "To run the agent manually:"
-echo "  cd ${REPO_DIR}"
-echo "  source .venv/bin/activate"
-echo "  deploy/jetson/start_agent.sh"
-echo
+
+if [[ "${MODE}" == "dev" ]]; then
+  cat <<EOF
+[INSTALL] Dev mode instructions:
+
+  cd ${REPO_DIR}
+  source .venv/bin/activate
+  # Example: local loop
+  python -m src.main --use-sitl 0 --camera 0
+
+  # Example: mock-drone SITL-style loop
+  python -m src.main --use-sitl 1 --mock-drone 1 --camera -1
+
+EOF
+else
+  cat <<EOF
+[INSTALL] Prod mode instructions:
+
+  cd ${REPO_DIR}
+  source .venv/bin/activate
+  deploy/jetson/start_agent.sh
+
+You can also hook this into systemd, e.g.:
+
+  sudo cp deploy/jetson/drone_agent.service /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now drone_agent
+
+EOF
+fi
+
 if [[ "${JETSON}" -eq 1 ]]; then
-  echo "[INSTALL] NOTE: On Jetson, for full torch support, rerun with:"
-  echo "  TORCH_WHL=<pytorch_wheel_url> TORCHVISION_WHL=<torchvision_wheel_url> \\"
-  echo "    deploy/jetson/install.sh"
+  cat <<EOF
+[INSTALL] NOTE: On Jetson, for full NVIDIA torch support, rerun with:
+
+  TORCH_WHL=<pytorch_wheel_url> TORCHVISION_WHL=<torchvision_wheel_url> \\
+    deploy/jetson/install.sh ${MODE}
+
+EOF
 fi

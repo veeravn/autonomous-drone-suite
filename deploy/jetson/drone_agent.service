@@ -1,17 +1,38 @@
 [Unit]
-Description=Autonomous Drone Suite Agent
-After=network.target
+Description=Autonomous Drone Suite (Production Flight Agent)
+After=network-online.target
+Wants=network-online.target
+
+# Safety: don't start unless we're in "flight" mode (optional)
+# You can comment this out if you don't use this mechanism
+ConditionPathExists=/opt/autonomous-drone-suite
 
 [Service]
 Type=simple
-User=jetson
-Group=jetson
-# Adjust paths if REPO_DIR is different
-Environment=REPO_DIR=/opt/autonomous-drone-suite
+User=ubuntu
+Group=ubuntu
+
+# Where the repo lives in prod
 WorkingDirectory=/opt/autonomous-drone-suite
-ExecStart=/opt/autonomous-drone-suite/deploy/jetson/start_agent.sh
-Restart=on-failure
+
+# Environment (optional but useful)
+Environment=PROFILE=prod
+Environment=PYTHONUNBUFFERED=1
+
+# Activate venv and launch prod profile
+ExecStart=/bin/bash -lc 'cd /opt/autonomous-drone-suite && \
+  source .venv/bin/activate && \
+  exec deploy/jetson/start_agent.sh prod'
+
+Restart=always
 RestartSec=5
+
+# Give it a sensible limit; adjust if needed
+TimeoutStartSec=60
+
+# Journald logging
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
