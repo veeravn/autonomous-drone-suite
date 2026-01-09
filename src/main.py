@@ -59,6 +59,12 @@ def parse_args():
     )
     ap.add_argument("--mock-drone", type=int, default=0,  # NEW
                     help="Use MockDrone backend instead of real MAVSDK/PX4 (1=mock, 0=normal).")  # NEW
+    ap.add_argument("--camera-backend", type=str, default="opencv",choices=["auto", "opencv", "oak"],
+                    help="Camera backend: opencv for USB webcams, oak for Luxonis OAK-D-Lite (DepthAI).",
+    )
+    ap.add_argument("--cam-width", type=int, default=1280, help="Camera width (used for OAK backend).")
+    ap.add_argument("--cam-height", type=int, default=720, help="Camera height (used for OAK backend).")
+    ap.add_argument("--cam-fps", type=float, default=30.0, help="Camera FPS (used for OAK backend).")
     return ap.parse_args()
 
 
@@ -201,7 +207,13 @@ def run_local(cfg: Config, args):
             print("[LOCAL] Running headless (no camera)")
         else:
             try:
-                cap = open_camera(args.camera)
+                cap = open_camera(
+                    args.camera,
+                    backend=getattr(args, "camera_backend", "auto"),
+                    width=getattr(args, "cam_width", 1280),
+                    height=getattr(args, "cam_height", 720),
+                    fps=getattr(args, "cam_fps", 30.0),
+                )
             except Exception:
                 # macOS AVFoundation fallback
                 cap = cv2.VideoCapture(int(args.camera), cv2.CAP_AVFOUNDATION)
@@ -366,7 +378,13 @@ async def run_sitl(cfg: Config, args):
             cap = None
         else:
             try:
-                cap = open_camera(args.camera)
+                cap = open_camera(
+                    args.camera,
+                    backend=getattr(args, "camera_backend", "auto"),
+                    width=getattr(args, "cam_width", 1280),
+                    height=getattr(args, "cam_height", 720),
+                    fps=getattr(args, "cam_fps", 30.0),
+                )
             except Exception:
                 cap = cv2.VideoCapture(int(args.camera), cv2.CAP_AVFOUNDATION)
                 if not cap.isOpened():

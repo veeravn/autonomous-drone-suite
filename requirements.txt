@@ -11,7 +11,7 @@ python-dotenv
 mavsdk
 
 # Vision / Embeddings
-
+depthai
 torch
 torchvision
 
