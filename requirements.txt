@@ -1,7 +1,7 @@
 # requirements.txt
 
 # Core
-
+pyyaml
 numpy
 opencv-python
 opencv-python-headless

@@ -1,0 +1,19 @@
+mavsdk:
+  system_address: "serial:///dev/ttyACM0:57600"
+
+safety:
+  min_rel_alt_m: 1.5
+  max_rel_alt_m: 8.0
+  rtl_battery_pct: 25
+
+capture:
+  novelty_capture_min: 0.14
+  capture_period_s: 2.0
+
+control:
+  yaw_step_deg: 20
+  alt_step_m: 0.75
+
+paths:
+  log_dir: "/home/drone/automous-drone-suite/logs"
+  capture_dir: "/home/drone/automous-drone-suite/captures"
