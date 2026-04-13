@@ -1,12 +1,21 @@
 # scripts/export_yolo_detector_onnx.py
-from ultralytics import YOLO
 from pathlib import Path
 
-def main():
-    # Tiny model; downloads automatically if not cached
-    model = YOLO("yolov8n.pt")  # or "yolo11n.pt" if you prefer YOLO11
+from huggingface_hub import hf_hub_download
+from ultralytics import YOLO
 
-    # Export to ONNX (320x320 input)
+
+def main():
+    repo_id = "Ultralytics/YOLO26"
+    filename = "yolo26n.pt"   # change to yolo26s.pt or yolo26m.pt if you want a larger model
+
+    # Download the YOLO26 detection weights from Hugging Face
+    weights_path = hf_hub_download(repo_id=repo_id, filename=filename)
+
+    # Load model from downloaded weights
+    model = YOLO(weights_path)
+
+    # Export to ONNX
     onnx_path = model.export(
         format="onnx",
         imgsz=320,
@@ -16,12 +25,13 @@ def main():
 
     print(f"Exported ONNX model to: {onnx_path}")
 
-    # Move/rename into models/hand_det.onnx
-    dst = Path("models") / "hand_det.onnx"
+    # Move/rename into models/yolo_nano.onnx
+    dst = Path("models") / "yolo_nano.onnx"
     dst.parent.mkdir(parents=True, exist_ok=True)
     Path(onnx_path).replace(dst)
 
     print(f"Moved to {dst.resolve()}")
+
 
 if __name__ == "__main__":
     main()

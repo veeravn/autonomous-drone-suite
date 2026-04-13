@@ -5,3 +5,6 @@ __pycache__/
 *.pyd
 data
 *.onnx
+models/*.onnx
+models/*.onnx.data
+models/clip_processor/
